@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const Json = struct {
+const json = struct {
     pub fn stringify(value: anytype, writer: std.io.AnyWriter) !void {
         const T = @TypeOf(value);
         if (isStringType(T)) {
@@ -253,7 +253,7 @@ test "stringify tuple" {
 }
 
 fn testStringify(expected: []const u8, value: anytype) !void {
-    const actual = try Json.stringifyAlloc(std.testing.allocator, value);
+    const actual = try json.stringifyAlloc(std.testing.allocator, value);
     defer std.testing.allocator.free(actual);
     try std.testing.expectEqualStrings(expected, actual);
 }
