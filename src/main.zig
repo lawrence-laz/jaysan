@@ -1,3 +1,6 @@
+// (c) 2024 Lawrence Laz
+// This code is licensed under MIT license (see LICENSE for details)
+
 const std = @import("std");
 
 const json = struct {
