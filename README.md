@@ -1,6 +1,25 @@
 # jayさん
 Jaysan is a fast json library written in Zig. Currently supports serialization only.
 
+```zig
+var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+
+const Foo = struct {
+    foo: i32,
+    bar: []const u8,
+};
+
+const string = try json.stringifyAlloc(
+    gpa.allocator(),
+    Foo{
+        .foo = 123,
+        .bar = "Hello, world!",
+    },
+);
+
+// {"foo":123,"bar":"Hello, world!"}
+```
+
 ```md
 Benchmark 1: std.json
   Time (mean ± σ):     151.7 ms ±   0.9 ms    [User: 147.1 ms, System: 4.1 ms]
