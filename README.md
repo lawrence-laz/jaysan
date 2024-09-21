@@ -1,4 +1,9 @@
-# jayさん
+<h1 align="center">
+  <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/c/c9/JSON_vector_logo.svg/160px-JSON_vector_logo.svg.png" width="64"><br>
+  Jayさん
+  <br>
+</h1>
+
 Jaysan is a fast json library written in Zig. Currently supports serialization only.
 
 ```zig
