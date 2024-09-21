@@ -31,5 +31,5 @@ Benchmark 2: jaysan
 
 Summary
   jaysan
-    2.96 ± 0.05 times faster than stdjson/zig-out/bin/zig-exe
+    2.96 ± 0.05 times faster than stdjson
 ```
