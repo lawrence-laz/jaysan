@@ -6,15 +6,15 @@ const std = @import("std");
 const json = struct {
     pub fn stringify(value: anytype, writer: std.io.AnyWriter) !void {
         const T = @TypeOf(value);
-        if (isStringType(T)) {
+        if (isString(T, value)) {
             try writer.writeAll("\"");
-        } else if (isArrayType(T)) {
+        } else if (isArray(T)) {
             try writer.writeAll("[");
         }
         try stringifyValue(value, writer);
-        if (isStringType(T)) {
+        if (isString(T, value)) {
             try writer.writeAll("\"");
-        } else if (isArrayType(T)) {
+        } else if (isArray(T)) {
             try writer.writeAll("]");
         }
     }
@@ -56,7 +56,13 @@ const json = struct {
                 try stringifyStruct(value, writer),
             .Null => try writer.writeAll("null"),
             .Optional => if (value) |unwrapped| try stringifyValue(unwrapped, writer) else try writer.writeAll("null"),
-            .Enum, .EnumLiteral => try writer.writeAll(@tagName(value)),
+            .Enum => |enum_info| if (enum_info.is_exhaustive) try writer.writeAll(@tagName(value)) else {
+                if (std.enums.tagName(T, value)) |tag|
+                    try writer.writeAll(tag)
+                else
+                    try writer.print("{d}", .{@as(enum_info.tag_type, @intFromEnum(value))});
+            },
+            .EnumLiteral => try writer.writeAll(@tagName(value)),
             .Union => try stringifyUnion(value, writer),
             else => @compileError("Cannot stringify type '" ++ @typeName(T) ++ "'"),
         }
@@ -80,16 +86,16 @@ const json = struct {
             const fields: []const std.builtin.Type.UnionField = std.meta.fields(T);
             inline for (fields) |field| {
                 if (value == @field(UnionTagType, field.name)) {
-                    const array_open = if (isArrayType(field.type)) "[" else "";
-                    const string_open = if (isStringType(field.type)) "\"" else "";
+                    const array_open = if (isArray(field.type)) "[" else "";
+                    const string_open = if (isString(field.type, @field(value, field.name))) "\"" else "";
                     try writer.writeAll("{\"" ++ field.name ++ "\":" ++ array_open ++ string_open);
                     if (field.type == void) {
                         try writer.writeAll("{}");
                     } else {
                         try stringifyValue(@field(value, field.name), writer);
                     }
-                    const last_array_close = if (isArrayType(field.type)) "]" else "";
-                    const last_string_close = if (isStringType(field.type)) "\"" else "";
+                    const last_array_close = if (isArray(field.type)) "]" else "";
+                    const last_string_close = if (isString(field.type, @field(value, field.name))) "\"" else "";
                     try writer.writeAll(last_array_close ++ last_string_close ++ "}");
                     break;
                 }
@@ -104,18 +110,20 @@ const json = struct {
         const T = @TypeOf(value);
         const fields: []const std.builtin.Type.StructField = std.meta.fields(T);
         inline for (fields, 0..) |field, i| {
-            const prev_array_close = if (i != 0 and isArrayType(fields[i - 1].type)) "]" else "";
-            const prev_string_close = if (i != 0 and isStringType(fields[i - 1].type)) "\"" else "";
+            const prev_field: ?std.builtin.Type.StructField = if (i != 0) fields[i - 1] else null;
+            const prev_array_close = if (prev_field != null and isArray(prev_field.?.type)) "]" else "";
+            const prev_string_close = if (prev_field != null and isString(prev_field.?.type, @field(value, prev_field.?.name))) "\"" else "";
             const object_open_or_comma = if (i == 0) "{" else ",";
-            const array_open = if (isArrayType(field.type)) "[" else "";
-            const string_open = if (isStringType(field.type)) "\"" else "";
+            const array_open = if (isArray(field.type)) "[" else "";
+            const string_open = if (isString(field.type, @field(value, field.name))) "\"" else "";
             try writer.writeAll(prev_array_close ++ prev_string_close ++ object_open_or_comma ++
                 "\"" ++ field.name ++ "\":" ++
                 array_open ++ string_open);
             try stringifyValue(@field(value, field.name), writer);
         }
-        const last_array_close = if (isArrayType(fields[fields.len - 1].type)) "]" else "";
-        const last_string_close = if (isStringType(fields[fields.len - 1].type)) "\"" else "";
+        const last_field = fields[fields.len - 1];
+        const last_array_close = if (isArray(last_field.type)) "]" else "";
+        const last_string_close = if (isString(last_field.type, @field(value, last_field.name))) "\"" else "";
         try writer.writeAll(last_array_close ++ last_string_close ++ "}");
     }
 
@@ -125,20 +133,22 @@ const json = struct {
         if (!struct_info.is_tuple) @compileError("Expected a tuple but got '" ++ @typeName(T) ++ "'");
         const fields: []const std.builtin.Type.StructField = std.meta.fields(T);
         inline for (fields, 0..) |field, i| {
-            const prev_array_close = if (i != 0 and isArrayType(fields[i - 1].type)) "]" else "";
-            const prev_string_close = if (i != 0 and isStringType(fields[i - 1].type)) "\"" else "";
+            const prev_field: ?std.builtin.Type.StructField = if (i != 0) fields[i - 1] else null;
+            const prev_array_close = if (i != 0 and isArray(prev_field.?.type)) "]" else "";
+            const prev_string_close = if (i != 0 and isString(prev_field.?.type, @field(value, prev_field.?.name))) "\"" else "";
             const array_open_or_comma = if (i == 0) "[" else ",";
-            const array_open = if (isArrayType(field.type)) "[" else "";
-            const string_open = if (isStringType(field.type)) "\"" else "";
+            const array_open = if (isArray(field.type)) "[" else "";
+            const string_open = if (isString(field.type, @field(value, field.name))) "\"" else "";
             try writer.writeAll(prev_array_close ++ prev_string_close ++ array_open_or_comma ++ array_open ++ string_open);
             try stringifyValue(@field(value, field.name), writer);
         }
-        const last_array_close = if (isArrayType(fields[fields.len - 1].type)) "]" else "";
-        const last_string_close = if (isStringType(fields[fields.len - 1].type)) "\"" else "";
+        const last_field = fields[fields.len - 1];
+        const last_array_close = if (isArray(last_field.type)) "]" else "";
+        const last_string_close = if (isString(last_field.type, @field(value, last_field.name))) "\"" else "";
         try writer.writeAll(last_array_close ++ last_string_close ++ "]");
     }
 
-    inline fn isArrayType(T: type) bool {
+    inline fn isArray(T: type) bool {
         comptime {
             return switch (@typeInfo(T)) {
                 .Array => |array_type_info| array_type_info.child != u8,
@@ -148,22 +158,24 @@ const json = struct {
         }
     }
 
-    inline fn isStringType(T: type) bool {
-        comptime {
-            return switch (@typeInfo(T)) {
-                .Array => |array_info| array_info.child == u8,
-                .Pointer => |ptr_info| switch (ptr_info.size) {
-                    .One => switch (@typeInfo(ptr_info.child)) {
-                        .Array => |array_info| array_info.child == u8,
-                        else => false,
-                    },
-                    .Many, .Slice => ptr_info.child == u8,
+    inline fn isString(T: type, val: T) bool {
+        return switch (@typeInfo(T)) {
+            .Array => |array_info| array_info.child == u8,
+            .Pointer => |ptr_info| switch (ptr_info.size) {
+                .One => switch (@typeInfo(ptr_info.child)) {
+                    .Array => |array_info| array_info.child == u8,
                     else => false,
                 },
-                .Enum, .EnumLiteral => true,
+                .Many, .Slice => ptr_info.child == u8,
                 else => false,
-            };
-        }
+            },
+            .Enum => |enum_info| if (enum_info.is_exhaustive)
+                true
+            else
+                std.enums.tagName(T, val) != null,
+            .EnumLiteral => true,
+            else => false,
+        };
     }
 
     pub fn stringifyAlloc(allocator: std.mem.Allocator, value: anytype) ![]const u8 {
@@ -222,10 +234,9 @@ test "stringify enum" {
     try testStringify("\"foo\"", Foo.foo);
     try testStringify("\"bar\"", Foo.bar);
 
-    // TODO
-    // const Bar = enum(u8) { foo = 0, _ };
-    // try testStringify("\"foo\"", Bar.foo);
-    // try testStringify("1", @as(Bar, @enumFromInt(1)));
+    const Bar = enum(u8) { foo = 0, _ };
+    try testStringify("\"foo\"", Bar.foo);
+    try testStringify("1", @as(Bar, @enumFromInt(1)));
 
     try testStringify("\"foo\"", .foo);
     try testStringify("\"bar\"", .bar);
