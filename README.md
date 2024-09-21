@@ -26,15 +26,20 @@ const string = try json.stringifyAlloc(
 ```
 
 ```md
-Benchmark 1: stdjson
-  Time (mean ± σ):     143.6 ms ±   1.1 ms    [User: 140.5 ms, System: 2.7 ms]
-  Range (min … max):   141.5 ms … 146.6 ms    20 runs
+Benchmark 1: zig-stdjson
+  Time (mean ± σ):     141.9 ms ±   1.1 ms    [User: 140.4 ms, System: 1.0 ms]
+  Range (min … max):   140.1 ms … 144.1 ms    20 runs
 
-Benchmark 2: jaysan
-  Time (mean ± σ):      48.5 ms ±   0.8 ms    [User: 47.0 ms, System: 1.2 ms]
-  Range (min … max):    46.4 ms …  50.0 ms    60 runs
+Benchmark 2: zig-jaysan
+  Time (mean ± σ):      46.8 ms ±   1.3 ms    [User: 46.2 ms, System: 0.4 ms]
+  Range (min … max):    43.1 ms …  49.2 ms    61 runs
+
+Benchmark 3: rust-serde
+  Time (mean ± σ):      46.9 ms ±   0.9 ms    [User: 45.8 ms, System: 0.9 ms]
+  Range (min … max):    45.9 ms …  50.9 ms    62 runs
 
 Summary
-  jaysan
-    2.96 ± 0.05 times faster than stdjson
+  zig-jaysan
+    1.00 ± 0.03 times faster than rust-serde
+    3.03 ± 0.09 times faster than zig-stdjson
 ```
