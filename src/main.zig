@@ -23,7 +23,7 @@ const json = struct {
         const T = @TypeOf(value);
         switch (@typeInfo(T)) {
             .Bool => try writer.writeAll(if (value) "true" else "false"),
-            .Int => try writer.print("{d}", .{value}), // TODO: Handle long numbers
+            .Int => try stringifyInt(value, writer),
             .ComptimeInt => try writer.print("{d}", .{value}),
             .Float => try writer.print("{d}", .{value}),
             .ComptimeFloat => try writer.print("{d}", .{value}),
@@ -66,6 +66,34 @@ const json = struct {
             .Union => try stringifyUnion(value, writer),
             else => @compileError("Cannot stringify type '" ++ @typeName(T) ++ "'"),
         }
+    }
+
+    fn stringifyInt(value: anytype, writer: std.io.AnyWriter) !void {
+        const char_map = "0123456789";
+        const T = @TypeOf(value);
+        const int_info = @typeInfo(T).Int;
+        var abs_value = if (int_info.signedness == .unsigned) value else @abs(value);
+        const digit_count = comptime blk: {
+            break :blk std.math.log10(std.math.maxInt(T)) +
+                1 +
+                (if (int_info.signedness == .signed) 1 else 0);
+        };
+        var buf: [digit_count]u8 = undefined;
+        var index: usize = digit_count - 1;
+        if (abs_value == 0) {
+            buf[index] = '0';
+            index -= 1;
+        } else while (abs_value != 0 and index != 0) {
+            buf[index] = char_map[@as(usize, @intCast(abs_value % 10))];
+            index -= 1;
+            abs_value /= 10;
+        }
+        if (int_info.signedness == .signed and value < 0) {
+            buf[index] = '-';
+        } else {
+            index += 1;
+        }
+        try writer.writeAll(buf[index..]);
     }
 
     fn stringifyArray(value: anytype, writer: std.io.AnyWriter) !void {
@@ -219,6 +247,8 @@ test "stringify basic types" {
     try testStringify("42", 42.0);
     try testStringify("42", @as(u8, 42));
     try testStringify("42", @as(u128, 42));
+    try testStringify("-2147483648", @as(i32, -2147483648));
+    try testStringify("0", @as(i32, 0));
     try testStringify("9999999999999999", 9999999999999999);
     try testStringify("42.123", @as(f32, 42.123));
     try testStringify("42", @as(f64, 42));
