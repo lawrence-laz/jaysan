@@ -3,7 +3,7 @@
 
 const std = @import("std");
 
-const json = struct {
+pub const json = struct {
     pub fn stringify(value: anytype, writer: std.io.AnyWriter) !void {
         const T = @TypeOf(value);
         if (isString(T, value)) {
