@@ -3,6 +3,13 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+
+    _ = b.addModule("jaysan", .{
+        .root_source_file = b.path("./src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const exe_unit_tests = b.addTest(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
