@@ -8,13 +8,13 @@ pub const json = struct {
         const T = @TypeOf(value);
         if (isString(T, value)) {
             try writer.writeAll("\"");
-        } else if (isArray(T)) {
+        } else if (isArray(T) or isArrayList(T)) {
             try writer.writeAll("[");
         }
         try stringifyValue(value, writer);
         if (isString(T, value)) {
             try writer.writeAll("\"");
-        } else if (isArray(T)) {
+        } else if (isArray(T) or isArrayList(T)) {
             try writer.writeAll("]");
         }
     }
@@ -52,6 +52,8 @@ pub const json = struct {
                 try stringifyArray(@as([]const array_info.child, &value), writer),
             .Struct => |struct_info| if (struct_info.is_tuple)
                 try stringifyTuple(value, writer)
+            else if (isArrayList(T))
+                try stringifyArray(value.items, writer)
             else
                 try stringifyStruct(value, writer),
             .Null => try writer.writeAll("null"),
@@ -186,6 +188,15 @@ pub const json = struct {
         }
     }
 
+    inline fn isArrayList(comptime T: type) bool {
+        comptime {
+            return std.meta.activeTag(@typeInfo(T)) == .Struct and
+                @hasField(T, "items") and
+                (T == std.ArrayList(std.meta.Child(std.meta.FieldType(T, .items))) or
+                T == std.ArrayListUnmanaged(std.meta.Child(std.meta.FieldType(T, .items))));
+        }
+    }
+
     inline fn isString(T: type, val: T) bool {
         return switch (@typeInfo(T)) {
             .Array => |array_info| array_info.child == u8,
@@ -294,6 +305,25 @@ test "stringify array" {
 
 test "stringify tuple" {
     try testStringify("[\"foo\",42]", std.meta.Tuple(&.{ []const u8, usize }){ "foo", 42 });
+}
+
+test "stringify ArrayList" {
+    {
+        var list: std.ArrayListUnmanaged(u32) = .{};
+        defer list.deinit(std.testing.allocator);
+        try list.append(std.testing.allocator, 1);
+        try list.append(std.testing.allocator, 2);
+        try list.append(std.testing.allocator, 3);
+        try testStringify("[1,2,3]", list);
+    }
+    {
+        var list = std.ArrayList(u32).init(std.testing.allocator);
+        defer list.deinit();
+        try list.append(1);
+        try list.append(2);
+        try list.append(3);
+        try testStringify("[1,2,3]", list);
+    }
 }
 
 fn testStringify(expected: []const u8, value: anytype) !void {
