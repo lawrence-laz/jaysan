@@ -8,13 +8,13 @@ pub const json = struct {
         const T = @TypeOf(value);
         if (isString(T, value)) {
             try writer.writeAll("\"");
-        } else if (isArray(T) or isArrayList(T)) {
+        } else if (isArray(T)) {
             try writer.writeAll("[");
         }
         try stringifyValue(value, writer);
         if (isString(T, value)) {
             try writer.writeAll("\"");
-        } else if (isArray(T) or isArrayList(T)) {
+        } else if (isArray(T)) {
             try writer.writeAll("]");
         }
     }
@@ -52,8 +52,10 @@ pub const json = struct {
                 try stringifyArray(@as([]const array_info.child, &value), writer),
             .Struct => |struct_info| if (struct_info.is_tuple)
                 try stringifyTuple(value, writer)
-            else if (isArrayList(T))
+            else if (isArray(T))
                 try stringifyArray(value.items, writer)
+            else if (isHashMap(T))
+                try stringifyHashMap(value, writer)
             else
                 try stringifyStruct(value, writer),
             .Null => try writer.writeAll("null"),
@@ -178,23 +180,71 @@ pub const json = struct {
         try writer.writeAll(last_array_close ++ last_string_close ++ "]");
     }
 
+    fn stringifyHashMap(value: anytype, writer: std.io.AnyWriter) !void {
+        const T = @TypeOf(value);
+        const TKey = getHashMapKeyType(T);
+        const TVal = getHashMapValueType(T);
+        var iter = value.iterator();
+        var prev_val: ?TVal = null;
+        while (iter.next()) |kvp| {
+            if (prev_val != null and isArray(TVal)) try writer.writeByte(']');
+            if (prev_val != null and isString(TVal, prev_val.?)) try writer.writeByte('"');
+            const object_open_or_comma = if (prev_val == null) "{" else ",";
+            const array_open = if (isArray(TVal)) "[" else "";
+            const string_open = if (isString(TVal, kvp.value_ptr.*)) "\"" else "";
+            try writer.writeAll(object_open_or_comma ++ "\"");
+            if (hasToString(TKey)) {
+                try stringifyValue(kvp.key_ptr.toString(), writer);
+            } else {
+                try stringifyValue(kvp.key_ptr.*, writer);
+            }
+            try writer.writeAll("\":" ++ array_open ++ string_open);
+            try stringifyValue(kvp.value_ptr.*, writer);
+            prev_val = kvp.value_ptr.*;
+        }
+        if (prev_val == null) try writer.writeByte('{');
+        if (isArray(TVal)) try writer.writeByte(']');
+        if (prev_val != null and isString(TVal, prev_val.?)) try writer.writeByte('"');
+        try writer.writeByte('}');
+    }
+
     inline fn isArray(T: type) bool {
         comptime {
             return switch (@typeInfo(T)) {
                 .Array => |array_type_info| array_type_info.child != u8,
                 .Pointer => |ptr_type_info| ptr_type_info.child != u8,
+                .Struct => @hasField(T, "items") and
+                    (T == std.ArrayList(std.meta.Child(std.meta.FieldType(T, .items))) or
+                    T == std.ArrayListUnmanaged(std.meta.Child(std.meta.FieldType(T, .items)))),
                 else => false,
             };
         }
     }
 
-    inline fn isArrayList(comptime T: type) bool {
+    inline fn isHashMap(comptime T: type) bool {
         comptime {
             return std.meta.activeTag(@typeInfo(T)) == .Struct and
-                @hasField(T, "items") and
-                (T == std.ArrayList(std.meta.Child(std.meta.FieldType(T, .items))) or
-                T == std.ArrayListUnmanaged(std.meta.Child(std.meta.FieldType(T, .items))));
+                @hasDecl(T, "iterator") and
+                (T == std.StringHashMapUnmanaged(getHashMapValueType(T)) or
+                T == std.AutoHashMapUnmanaged(getHashMapKeyType(T), getHashMapValueType(T)));
         }
+    }
+
+    inline fn hasToString(comptime T: type) bool {
+        comptime {
+            return switch (@typeInfo(T)) {
+                .Struct => @hasDecl(T, "toString"),
+                else => false,
+            };
+        }
+    }
+
+    inline fn getHashMapKeyType(comptime T: type) type {
+        return @typeInfo(@typeInfo(@TypeOf(T.getKey)).Fn.return_type.?).Optional.child;
+    }
+
+    inline fn getHashMapValueType(comptime T: type) type {
+        return @typeInfo(@typeInfo(@TypeOf(T.get)).Fn.return_type.?).Optional.child;
     }
 
     inline fn isString(T: type, val: T) bool {
@@ -307,7 +357,7 @@ test "stringify tuple" {
     try testStringify("[\"foo\",42]", std.meta.Tuple(&.{ []const u8, usize }){ "foo", 42 });
 }
 
-test "stringify ArrayList" {
+test "stringify std.ArrayList and std.ArrayListUnmanaged" {
     {
         var list: std.ArrayListUnmanaged(u32) = .{};
         defer list.deinit(std.testing.allocator);
@@ -323,6 +373,72 @@ test "stringify ArrayList" {
         try list.append(2);
         try list.append(3);
         try testStringify("[1,2,3]", list);
+    }
+}
+
+test "stringify hash maps" {
+    {
+        // u32 -> bool
+        var hashmap: std.AutoHashMapUnmanaged(u32, bool) = .{};
+        defer hashmap.deinit(std.testing.allocator);
+        try hashmap.put(std.testing.allocator, 123, true);
+        try hashmap.put(std.testing.allocator, 456, false);
+        try testStringify("{\"123\":true,\"456\":false}", hashmap);
+    }
+    {
+        // bool -> u32
+        var hashmap: std.AutoHashMapUnmanaged(bool, u32) = .{};
+        defer hashmap.deinit(std.testing.allocator);
+        try hashmap.put(std.testing.allocator, true, 123);
+        try hashmap.put(std.testing.allocator, false, 456);
+        try testStringify("{\"true\":123,\"false\":456}", hashmap);
+    }
+    {
+        // u32 -> ArrayList(struct)
+        const Foo = struct { foo: []const u8, bar: f32 };
+        var hashmap: std.AutoHashMapUnmanaged(u32, std.ArrayListUnmanaged(Foo)) = .{};
+        defer hashmap.deinit(std.testing.allocator);
+        try hashmap.put(std.testing.allocator, 1, .{});
+        defer hashmap.getPtr(1).?.deinit(std.testing.allocator);
+        try hashmap.getPtr(1).?.append(std.testing.allocator, .{ .foo = "hello", .bar = 123 });
+        try hashmap.getPtr(1).?.append(std.testing.allocator, .{ .foo = "world", .bar = 456 });
+        try hashmap.put(std.testing.allocator, 2, .{});
+        defer hashmap.getPtr(2).?.deinit(std.testing.allocator);
+        try hashmap.getPtr(2).?.append(std.testing.allocator, .{ .foo = "bye", .bar = 789 });
+        try hashmap.getPtr(2).?.append(std.testing.allocator, .{ .foo = "world", .bar = 0.1 });
+        try testStringify("{\"1\":[{\"foo\":\"hello\",\"bar\":123},{\"foo\":\"world\",\"bar\":456}],\"2\":[{\"foo\":\"bye\",\"bar\":789},{\"foo\":\"world\",\"bar\":0.1}]}", hashmap);
+    }
+    {
+        // string -> string
+        var hashmap: std.StringHashMapUnmanaged([]const u8) = .{};
+        defer hashmap.deinit(std.testing.allocator);
+        try hashmap.put(std.testing.allocator, "hello", "world");
+        try hashmap.put(std.testing.allocator, "bye", "world");
+        try testStringify("{\"hello\":\"world\",\"bye\":\"world\"}", hashmap);
+    }
+    {
+        // struct.toString() -> bool
+        const Foo = struct {
+            foo: [10]u8,
+            bar: [10]u8,
+            pub fn toString(self: @This()) [20]u8 {
+                var buf: [20]u8 = .{0} ** 20;
+                buf[0..10].* = self.foo;
+                buf[10..20].* = self.bar;
+                return buf;
+            }
+        };
+        var hashmap: std.AutoHashMapUnmanaged(Foo, bool) = .{};
+        defer hashmap.deinit(std.testing.allocator);
+        try hashmap.put(std.testing.allocator, .{ .foo = "1234567890".*, .bar = "abcdefghij".* }, true);
+        try hashmap.put(std.testing.allocator, .{ .foo = "abcdefghij".*, .bar = "1234567890".* }, false);
+        try testStringify("{\"1234567890abcdefghij\":true,\"abcdefghij1234567890\":false}", hashmap);
+    }
+    {
+        // empty
+        var hashmap: std.AutoHashMapUnmanaged(u32, u32) = .{};
+        defer hashmap.deinit(std.testing.allocator);
+        try testStringify("{}", hashmap);
     }
 }
 
