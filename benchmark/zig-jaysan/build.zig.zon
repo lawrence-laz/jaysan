@@ -1,0 +1,15 @@
+.{
+    .name = "zig-jaysan-bench",
+    .version = "0.0.0",
+    .dependencies = .{
+        .jaysan = .{
+            .url = "git+https://github.com/lawrence-laz/jaysan#d32edeaef8315c1447ff2c8c4d5f114461080e12",
+            .hash = "1220a880621dda29054a1ed9d2109662d1091a06b98a17b9a7f9da55f5f92b2771b4",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

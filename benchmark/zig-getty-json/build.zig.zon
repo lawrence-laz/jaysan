@@ -1,0 +1,15 @@
+.{
+    .name = "zig-exe",
+    .version = "0.0.0",
+    .dependencies = .{
+        .json = .{
+            .url = "git+https://github.com/getty-zig/json#4a38504cefdc9e5d64ae35364233d6fa4cb78edf",
+            .hash = "1220c7d749d83bcac8daecd67f1f78ee2762df10c9fef123bbf44c882965f644c1e5",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
