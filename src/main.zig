@@ -300,16 +300,27 @@ pub const json = struct {
             return parser.slice[0];
         }
 
+        fn peekByteAssume(parser: *Parser) !u8 {
+            try parser.feed();
+            return if (parser.slice.len > 0) parser.slice[0] else error.invalid_json;
+        }
+
         fn peekBytesAtLeast(parser: *Parser, comptime len: usize) !?[]const u8 {
             if (len > buf_len) @compileError("peekBytes len has to be less than 256");
             try parser.feed();
             return if (len < parser.slice.len) parser.slice[0..len] else parser.slice;
         }
 
-        fn consumeByte(parser: *Parser) !?u8 {
+        fn consumeByte(parser: *Parser) !u8 {
             try parser.feed();
             defer parser.slice = parser.slice[1..];
             return parser.slice[0];
+        }
+
+        fn consumeBytesBuf(parser: *Parser, comptime size: usize, buf: []u8) !void {
+            try parser.feed();
+            defer parser.slice = parser.slice[size..];
+            buf[0..size].* = parser.slice[0..size].*;
         }
 
         fn consumeWhitespace(parser: *Parser) !void {
@@ -330,10 +341,10 @@ pub const json = struct {
     pub fn parse(comptime T: type, reader: std.io.AnyReader) !T {
         var parser: Parser = .init(reader);
         try parser.consumeWhitespace();
-        return try parseType(T, &parser);
+        return try parseValue(T, &parser);
     }
 
-    fn parseType(comptime T: type, parser: *Parser) !T {
+    fn parseValue(comptime T: type, parser: *Parser) !T {
         switch (@typeInfo(T)) {
             .bool => return try parseBool(parser),
             .int => @compileError("int not implemented"),
@@ -395,11 +406,80 @@ pub const json = struct {
             return error.invalid_json;
     }
 
+    fn parseStringBuf(buf: []u8, parser: *Parser) ![]u8 {
+        var first_quote: bool = true;
+        var string: []u8 = buf[0..0];
+        sw: switch (try parser.consumeByte()) {
+            // TODO: Handle >1 byte
+            // 0x0020...0x10FFFF => |char| {
+            0x20...0xFF => |char| {
+                switch (char) {
+                    '"' => if (first_quote) {
+                        first_quote = false;
+                        continue :sw try parser.consumeByte();
+                    },
+                    '\\' => {
+                        switch (try parser.consumeByte()) {
+                            inline '"', '\\', '/', 'b', 'f', 'n', 'r', 't' => |escaped_char| {
+                                string = try appendBuf(buf, string.len, escapeChar(escaped_char));
+                                continue :sw try parser.consumeByte();
+                            },
+                            'u' => {
+                                // TODO: This should use std.unicode.utf8Encode instead?
+                                var hex_buf: [4]u8 = undefined;
+                                try parser.consumeBytesBuf(4, &hex_buf);
+                                const hex = try hexChar(hex_buf);
+                                if (hex[0] != 0x00) string = try appendBuf(buf, string.len, hex[0]);
+                                string = try appendBuf(buf, string.len, hex[1]);
+                                continue :sw try parser.consumeByte();
+                            },
+                            else => return error.invalid_json,
+                        }
+                    },
+                    else => {
+                        string = try appendBuf(buf, string.len, char);
+                        continue :sw try parser.consumeByte();
+                    },
+                }
+            },
+            else => return error.invalid_json,
+        }
+        return string;
+    }
+
+    fn hexChar(hex: [4]u8) ![2]u8 {
+        return .{ try std.fmt.parseUnsigned(u8, hex[0..2], 16), try std.fmt.parseUnsigned(u8, hex[2..4], 16) };
+    }
+
+    fn escapeChar(comptime char: u8) u8 {
+        return switch (char) {
+            inline '"' => '"',
+            inline '\\' => '\\',
+            inline '/' => '/',
+            inline 'b' => 0x08,
+            inline 'f' => 0x0C,
+            inline 'n' => '\n',
+            inline 'r' => '\r',
+            inline 't' => '\t',
+            else => unreachable,
+        };
+    }
+
+    fn appendBuf(buf: []u8, index: usize, value: u8) ![]u8 {
+        if (buf.len < index + 1) {
+            return error.insufficient_buffer_size;
+        }
+        buf[index] = value;
+        return buf[0 .. index + 1];
+    }
+
+    // TODO: parseStringAlloc
+
     fn parseOptional(comptime T: type, parser: *Parser) !?T {
         if (try parser.peekByte()) |byte|
             switch (byte) {
                 'n' => return if (try parser.checkSlice("null")) null else error.invalid_json,
-                else => return try parseType(T, parser),
+                else => return try parseValue(T, parser),
             }
         else
             return error.invalid_json;
@@ -419,7 +499,17 @@ pub const json = struct {
     }
 };
 
-test "parse" {
+test "parse string" {
+    // TODO: Plug into generic parse function
+
+    var buf: [100]u8 = undefined;
+    var stream = std.io.fixedBufferStream("\n\"hello\\n\\u0077\\u006f\\u0072\\u006c\\u0064\"");
+    var parser: json.Parser = .init(stream.reader().any());
+    try parser.consumeWhitespace();
+    try std.testing.expectEqualStrings("hello\nworld", try json.parseStringBuf(&buf, &parser));
+}
+
+test "parse bool" {
     try std.testing.expectEqual(true, try json.parseFromSlice(bool,
         \\            
         \\  true 
@@ -432,6 +522,7 @@ test "parse" {
     ));
     try std.testing.expectEqual(false, try json.parseFromSlice(bool, "false "));
     try std.testing.expectError(error.invalid_json, json.parseFromSlice(bool, "fals"));
+    try std.testing.expectError(error.invalid_json, json.parseFromSlice(bool, "null"));
     try std.testing.expectEqual(true, try json.parseFromSlice(?bool, "true "));
     try std.testing.expectEqual(null, try json.parseFromSlice(?bool, "null"));
     try std.testing.expectError(error.invalid_json, json.parseFromSlice(?bool, "nil"));
