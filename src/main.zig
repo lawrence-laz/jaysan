@@ -291,13 +291,28 @@ pub const json = struct {
         fn feed(parser: *Parser) !void {
             if (parser.slice.len == 0) {
                 const bytes_read = try parser.reader.read(&parser.buf);
-                parser.slice = (&parser.buf)[0..bytes_read];
+                if (bytes_read > 0) {
+                    parser.slice = (&parser.buf)[0..bytes_read];
+                }
             }
         }
 
         fn peekByte(parser: *Parser) !?u8 {
             try parser.feed();
-            return parser.slice[0];
+            return if (parser.slice.len > 0) parser.slice[0] else null;
+        }
+
+        fn isNthByteScalar(parser: *Parser, index: usize, slice: []const u8) !bool {
+            try parser.feed();
+            if (parser.slice.len > index) {
+                if (std.mem.indexOfScalar(u8, slice, parser.slice[index])) |_| {
+                    return true;
+                } else {
+                    return false;
+                }
+            } else {
+                return false;
+            }
         }
 
         fn peekByteAssume(parser: *Parser) !u8 {
@@ -311,20 +326,24 @@ pub const json = struct {
             return if (len < parser.slice.len) parser.slice[0..len] else parser.slice;
         }
 
+        // TODO: Assume variants without .feed, maybe all should be like that?
         fn consumeByte(parser: *Parser) !u8 {
             try parser.feed();
             defer parser.slice = parser.slice[1..];
             return parser.slice[0];
         }
 
-        fn consumeBytesBuf(parser: *Parser, comptime size: usize, buf: []u8) !void {
+        fn discardBytes(parser: *Parser, len: usize) void {
+            parser.slice = parser.slice[len..];
+        }
+
+        fn consumeBytesBufAssume(parser: *Parser, comptime size: usize, buf: []u8) !void {
             try parser.feed();
             defer parser.slice = parser.slice[size..];
             buf[0..size].* = parser.slice[0..size].*;
         }
 
         fn consumeWhitespace(parser: *Parser) !void {
-            try parser.feed();
             while (try parser.peekByte()) |byte| {
                 switch (byte) {
                     ' ', '\n', '\r', '\t' => _ = try parser.consumeByte(),
@@ -338,18 +357,72 @@ pub const json = struct {
         }
     };
 
+    /// TODO Convert this into parseInto
     pub fn parse(comptime T: type, reader: std.io.AnyReader) !T {
         var parser: Parser = .init(reader);
+        const element = try parseElement(T, &parser);
+        return element;
+    }
+
+    // TODO: Accept anytype for reader?
+
+    /// Parses JSON string from reader into a given target value.
+    /// Does not allocate.
+    pub fn parseInto(target: anytype, reader: std.io.AnyReader) !void {
+        const T = @TypeOf(target);
+        var parser: Parser = .init(reader);
+        const element = try parseElement(T, &parser);
+        return element;
+    }
+
+    fn parseElement(comptime T: type, parser: *Parser) !T {
         try parser.consumeWhitespace();
-        return try parseValue(T, &parser);
+        const value = try parseValue(T, parser);
+        try parser.consumeWhitespace();
+        // TOOD: Make sure nothing else is left to parse?
+        return value;
+    }
+
+    fn parseMemberElement(comptime T: type, parser: *Parser, parent: anytype, comptime field_name: []const u8) !T {
+        try parser.consumeWhitespace();
+        const value = try parseMemberValue(T, parser, parent, field_name);
+        try parser.consumeWhitespace();
+        // TOOD: Make sure nothing else is left to parse?
+        return value;
+    }
+
+    fn parseMemberValue(comptime T: type, parser: *Parser, parent: anytype, comptime field_name: []const u8) !T {
+        switch (@typeInfo(T)) {
+            .pointer => |ptr_info| switch (ptr_info.size) {
+                .One => try parseValue(T, parser),
+                .Many, .Slice => {
+                    // if (ptr_info.size == .Many and ptr_info.sentinel == null)
+                    //     @compileError("Cannot stringify type '" ++ @typeName(T) ++ "' without sentinel");
+                    // const slice = if (ptr_info.size == .Many) std.mem.span(value) else value;
+                    if (ptr_info.child == u8)
+                        @compileError("TODO: this requires allocation?")
+                    else
+                        @compileError("TODO: this requried alloc?");
+                },
+                else => @compileError("Cannot parse type '" ++ @typeName(T) ++ "'"),
+            },
+            .array => |array_info| {
+                if (array_info.child == u8) {
+                    _ = try parseStringBuf(&@field(parent, field_name), parser);
+                } else {
+                    _ = try parseArrayBuf(T, &@field(parent, field_name), parser);
+                }
+                return @field(parent, field_name);
+            },
+            else => return try parseValue(T, parser),
+        }
     }
 
     fn parseValue(comptime T: type, parser: *Parser) !T {
         switch (@typeInfo(T)) {
             .bool => return try parseBool(parser),
-            .int => @compileError("int not implemented"),
+            .int, .float => return try parseNumber(T, parser),
             .comptime_int => @compileError("comptime int not implemented"),
-            .float => @compileError("float not implemented"),
             .comptime_float => @compileError("comtime float not implemented"),
             .pointer => |ptr_info| switch (ptr_info.size) {
                 .One => switch (@typeInfo(ptr_info.child)) {
@@ -381,7 +454,7 @@ pub const json = struct {
             else if (isHashMap(T))
                 @compileError("hashmap not implemented")
             else
-                @compileError("struct not implemented"),
+                return try parseObject(T, parser),
             .null => @compileError("null not implemented"),
             .optional => |optional_info| return try parseOptional(optional_info.child, parser),
             .@"enum" => |enum_info| if (enum_info.is_exhaustive) {
@@ -395,11 +468,204 @@ pub const json = struct {
         }
     }
 
+    fn parseArrayBuf(comptime T: type, buf: []T, parser: *Parser) ![]T {
+        var slice: []T = buf[0..0];
+
+        if (try parser.consumeByte() != '[') {
+            return error.invalid_json;
+        }
+        try parser.consumeWhitespace();
+
+        // TODO: consumeByte should return optional for when stream ends?
+        sw: switch (try parser.peekByte() orelse return error.invalid_json) {
+            ']' => return slice,
+            // TODO: validate incorrect consecutive commas, etc.
+            ',' => if (slice.len == 0) return error.invalid_json else {
+                _ = try parser.consumeByte();
+                continue :sw try parser.peekByte() orelse return error.invalid_json;
+            },
+            else => {
+                const element = try parseElement(T, parser);
+                slice = try appendBuf(
+                    T,
+                    buf,
+                    slice.len,
+                    element,
+                );
+                continue :sw try parser.peekByte() orelse return error.invalid_json;
+            },
+        }
+    }
+
+    fn parseObject(comptime T: type, parser: *Parser) !T {
+        // TODO: would trying to init class with exact fields be faster somehow? idk.
+        var result: T = std.mem.zeroInit(T, .{});
+        var buf: [256]u8 = @splat(0);
+        if (try parser.consumeByte() != '{') {
+            return error.invalid_json;
+        }
+        try parser.consumeWhitespace();
+        sw: switch (try parser.peekByte() orelse return error.invalid_json) {
+            '}' => {
+                _ = try parser.consumeByte();
+                return result;
+            },
+            ',' => {
+                _ = try parser.consumeByte();
+                continue :sw try parser.peekByte() orelse return error.invalid_json;
+            },
+            else => {
+                const member_name = try parseStringBuf(&buf, parser);
+                try parser.consumeWhitespace();
+                if (try parser.consumeByte() != ':') {
+                    return error.invalid_json;
+                }
+
+                var member_found = false;
+                // TODO: non-linear search with early exit?
+                inline for (std.meta.fields(T)) |field| {
+                    const struct_field: std.builtin.Type.StructField = field;
+                    if (std.mem.eql(u8, struct_field.name, member_name)) {
+                        member_found = true;
+                        const member_value = try parseMemberElement(
+                            struct_field.type,
+                            parser,
+                            &result,
+                            struct_field.name,
+                        );
+                        @field(result, struct_field.name) = member_value;
+                    }
+                }
+
+                if (member_found) {
+                    // _ = parser.consumeByte()
+
+                } else {
+                    return error.invalid_json;
+                }
+
+                continue :sw try parser.peekByte() orelse return error.invalid_json;
+            },
+        }
+        return error.invalid_json;
+    }
+
+    fn parseNumber(comptime T: type, parser: *Parser) !T {
+        return switch (@typeInfo(T)) {
+            .int => try parseInteger(T, parser),
+            .float => {
+                try parser.feed();
+                // var slice: []u8 = parser.buf[0..0];
+                var len: usize = 0;
+                if (try parser.isNthByteScalar(len, "-")) { // TODO: Would it be faster to do a simple check?
+                    len += 1;
+                }
+
+                // TODO check bounds
+                integer: switch (parser.slice[len]) {
+                    '0'...'9' => {
+                        len += 1;
+                        if (parser.slice.len > len) continue :integer parser.slice[len];
+                    },
+                    else => {},
+                }
+
+                if (try parser.isNthByteScalar(len, ".")) {
+                    len += 1;
+                    digits: switch (parser.slice[len]) {
+                        '0'...'9' => {
+                            len += 1;
+                            if (parser.slice.len > len) continue :digits parser.slice[len];
+                        },
+                        else => {},
+                    }
+                }
+
+                if (try parser.isNthByteScalar(len, "eE")) {
+                    len += 1;
+                    if (try parser.isNthByteScalar(len, "-+")) {
+                        len += 1;
+                    }
+                    digits: switch (parser.slice[len]) {
+                        '0'...'9' => {
+                            len += 1;
+                            if (parser.slice.len > len) continue :digits parser.slice[len];
+                        },
+                        else => {},
+                    }
+                }
+
+                const float: T = try std.fmt.parseFloat(T, parser.slice[0..len]);
+                parser.discardBytes(len);
+                return float;
+            },
+            else => @compileError("Type '" ++ @typeName(T) ++ "' is not a number."),
+        };
+    }
+
+    fn parseInteger(comptime T: type, parser: *Parser) !T {
+        switch (@typeInfo(T)) {
+            .int => |int_info| {
+                switch (int_info.signedness) {
+                    .signed => if ((try parser.peekByte() orelse return error.invalid_json) == '-') {
+                        _ = try parser.consumeByte();
+                        return try parseUnsignedInteger(T, parser) * -1;
+                    } else {
+                        return try parseUnsignedInteger(T, parser);
+                    },
+                    .unsigned => return try parseUnsignedInteger(T, parser),
+                }
+            },
+            else => @compileError("Type '" ++ @typeName(T) ++ "' is not an integer."),
+        }
+    }
+
+    fn parseUnsignedInteger(comptime T: type, parser: *Parser) !T {
+        var int: T = 0;
+        // TODO: handle empty
+        sw: switch (try parser.peekByte() orelse return int) {
+            '0'...'9' => {
+                const digit: T = try parser.consumeByte() - '0';
+                int = int * 10 + digit;
+                continue :sw try parser.peekByte() orelse return int;
+            },
+            // TODO: fraction
+            // TODO: exponent
+            // TODO: handle good exit vs empty number
+            else => return int,
+        }
+    }
+
     fn parseBool(parser: *Parser) !bool {
+        var buf: [5]u8 = @splat(0);
         if (try parser.peekByte()) |byte|
             switch (byte) {
-                't' => return if (try parser.checkSlice("true")) true else error.invalid_json,
-                'f' => return if (try parser.checkSlice("false")) false else error.invalid_json,
+                't' => {
+                    if (parser.slice.len >= 4) {
+                        try parser.consumeBytesBufAssume(4, &buf);
+                    } else {
+                        return error.invalid_json;
+                    }
+
+                    if (std.mem.eql(u8, buf[0..4], "true")) {
+                        return true;
+                    } else {
+                        return error.invalid_json;
+                    }
+                },
+                'f' => {
+                    if (parser.slice.len >= 5) {
+                        try parser.consumeBytesBufAssume(5, &buf);
+                    } else {
+                        return error.invalid_json;
+                    }
+
+                    if (std.mem.eql(u8, buf[0..5], "false")) {
+                        return false;
+                    } else {
+                        return error.invalid_json;
+                    }
+                },
                 else => return error.invalid_json,
             }
         else
@@ -421,23 +687,27 @@ pub const json = struct {
                     '\\' => {
                         switch (try parser.consumeByte()) {
                             inline '"', '\\', '/', 'b', 'f', 'n', 'r', 't' => |escaped_char| {
-                                string = try appendBuf(buf, string.len, escapeChar(escaped_char));
+                                string = try appendBuf(u8, buf, string.len, escapeChar(escaped_char));
                                 continue :sw try parser.consumeByte();
                             },
                             'u' => {
                                 // TODO: This should use std.unicode.utf8Encode instead?
                                 var hex_buf: [4]u8 = undefined;
-                                try parser.consumeBytesBuf(4, &hex_buf);
+                                if (parser.slice.len >= 4) {
+                                    try parser.consumeBytesBufAssume(4, &hex_buf);
+                                } else {
+                                    return error.invalid_json;
+                                }
                                 const hex = try hexChar(hex_buf);
-                                if (hex[0] != 0x00) string = try appendBuf(buf, string.len, hex[0]);
-                                string = try appendBuf(buf, string.len, hex[1]);
+                                if (hex[0] != 0x00) string = try appendBuf(u8, buf, string.len, hex[0]);
+                                string = try appendBuf(u8, buf, string.len, hex[1]);
                                 continue :sw try parser.consumeByte();
                             },
                             else => return error.invalid_json,
                         }
                     },
                     else => {
-                        string = try appendBuf(buf, string.len, char);
+                        string = try appendBuf(u8, buf, string.len, char);
                         continue :sw try parser.consumeByte();
                     },
                 }
@@ -465,7 +735,7 @@ pub const json = struct {
         };
     }
 
-    fn appendBuf(buf: []u8, index: usize, value: u8) ![]u8 {
+    fn appendBuf(comptime T: type, buf: []T, index: usize, value: T) ![]T {
         if (buf.len < index + 1) {
             return error.insufficient_buffer_size;
         }
@@ -499,9 +769,83 @@ pub const json = struct {
     }
 };
 
-test "parse string" {
+test "parse array" {
     // TODO: Plug into generic parse function
 
+    var buf: [100]f32 = undefined;
+    var stream = std.io.fixedBufferStream(
+        \\ [1.23, 2.34, 3.45, 4.56]
+    );
+    var parser: json.Parser = .init(stream.reader().any());
+    try parser.consumeWhitespace(); // TODO: This shouldn't be in test?
+    try std.testing.expectEqualSlices(
+        f32,
+        &.{ 1.23, 2.34, 3.45, 4.56 },
+        try json.parseArrayBuf(f32, &buf, &parser),
+    );
+}
+
+test "parse object" {
+    const Foo = struct { bar: bool, baz: f32, fizz: u32 };
+    try std.testing.expectEqual(
+        Foo{ .bar = true, .baz = 1.23, .fizz = 456 },
+        try json.parseFromSlice(
+            Foo,
+            \\ {"bar":true,"baz":1.23,"fizz":456}
+            ,
+        ),
+    );
+}
+
+test "parse object nested" {
+    const Bar = struct { burbur: bool };
+    const Foo = struct { bar: Bar, baz: f32, fizz: u32 };
+    try std.testing.expectEqual(
+        Foo{ .bar = .{ .burbur = false }, .baz = 1.23, .fizz = 456 },
+        try json.parseFromSlice(
+            Foo,
+            \\ {"bar":{"burbur":false},"baz":1.23,"fizz":456}
+            ,
+        ),
+    );
+}
+
+test "parse object string member" {
+    {
+        // Array
+        const Foo = struct { bar: [100]u8, baz: bool };
+        var actual = try json.parseFromSlice(
+            Foo,
+            \\ {"bar":"hello, world!","baz":true}
+            ,
+        );
+        try std.testing.expectEqualSlices(
+            u8,
+            "hello, world!",
+            actual.bar[0..13],
+        );
+    }
+}
+
+test "parse numbers" {
+    try std.testing.expectEqual(123, try json.parseFromSlice(u32,
+        \\
+        \\  123
+    ));
+    try std.testing.expectEqual(-123, try json.parseFromSlice(i32,
+        \\
+        \\  -123
+    ));
+    try std.testing.expectEqual(321, try json.parseFromSlice(i32,
+        \\
+        \\  321
+    ));
+    try std.testing.expectEqual(123.123, try json.parseFromSlice(f32, "123.123"));
+    try std.testing.expectEqual(-123.321, try json.parseFromSlice(f32, "-123.321"));
+}
+
+test "parse string" {
+    // TODO: Fix multi-byte unicode
     var buf: [100]u8 = undefined;
     var stream = std.io.fixedBufferStream("\n\"hello\\n\\u0077\\u006f\\u0072\\u006c\\u0064\"");
     var parser: json.Parser = .init(stream.reader().any());
