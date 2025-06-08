@@ -277,6 +277,8 @@ pub const json = struct {
         return buf.toOwnedSlice();
     }
 
+    const ParseError = error{invalid_json};
+
     const Parser = struct {
         const buf_len: usize = 256;
 
@@ -357,114 +359,103 @@ pub const json = struct {
         }
     };
 
-    /// TODO Convert this into parseInto
-    pub fn parse(comptime T: type, reader: std.io.AnyReader) !T {
-        var parser: Parser = .init(reader);
-        const element = try parseElement(T, &parser);
-        return element;
-    }
-
     // TODO: Accept anytype for reader?
 
     /// Parses JSON string from reader into a given target value.
     /// Does not allocate.
-    pub fn parseInto(target: anytype, reader: std.io.AnyReader) !void {
-        const T = @TypeOf(target);
+    pub fn parse(value_ptr: anytype, reader: std.io.AnyReader) !void {
         var parser: Parser = .init(reader);
-        const element = try parseElement(T, &parser);
-        return element;
+        try parseElement(value_ptr, &parser);
     }
 
-    fn parseElement(comptime T: type, parser: *Parser) !T {
-        try parser.consumeWhitespace();
-        const value = try parseValue(T, parser);
-        try parser.consumeWhitespace();
-        // TOOD: Make sure nothing else is left to parse?
-        return value;
+    fn isPtr(comptime T: type) bool {
+        return std.meta.activeTag(@typeInfo(T)) == .pointer;
     }
 
-    fn parseMemberElement(comptime T: type, parser: *Parser, parent: anytype, comptime field_name: []const u8) !T {
+    fn parseElement(value_ptr: anytype, parser: *Parser) !void {
+        comptime if (!isPtr(@TypeOf(value_ptr))) @compileError("Expected a pointer, got '" ++ @typeName(@TypeOf(value_ptr)) ++ "'.");
+
         try parser.consumeWhitespace();
-        const value = try parseMemberValue(T, parser, parent, field_name);
+        try parseValue(value_ptr, parser);
         try parser.consumeWhitespace();
         // TOOD: Make sure nothing else is left to parse?
-        return value;
     }
 
-    fn parseMemberValue(comptime T: type, parser: *Parser, parent: anytype, comptime field_name: []const u8) !T {
-        switch (@typeInfo(T)) {
-            .pointer => |ptr_info| switch (ptr_info.size) {
-                .One => try parseValue(T, parser),
-                .Many, .Slice => {
-                    // if (ptr_info.size == .Many and ptr_info.sentinel == null)
-                    //     @compileError("Cannot stringify type '" ++ @typeName(T) ++ "' without sentinel");
-                    // const slice = if (ptr_info.size == .Many) std.mem.span(value) else value;
-                    if (ptr_info.child == u8)
-                        @compileError("TODO: this requires allocation?")
-                    else
-                        @compileError("TODO: this requried alloc?");
-                },
-                else => @compileError("Cannot parse type '" ++ @typeName(T) ++ "'"),
-            },
-            .array => |array_info| {
-                if (array_info.child == u8) {
-                    _ = try parseStringBuf(&@field(parent, field_name), parser);
-                } else {
-                    _ = try parseArrayBuf(T, &@field(parent, field_name), parser);
-                }
-                return @field(parent, field_name);
-            },
-            else => return try parseValue(T, parser),
-        }
-    }
+    fn parseValue(value_ptr: anytype, parser: *Parser) !void {
+        const TPtr = @TypeOf(value_ptr);
+        const T = std.meta.Child(TPtr);
 
-    fn parseValue(comptime T: type, parser: *Parser) !T {
         switch (@typeInfo(T)) {
-            .bool => return try parseBool(parser),
-            .int, .float => return try parseNumber(T, parser),
-            .comptime_int => @compileError("comptime int not implemented"),
-            .comptime_float => @compileError("comtime float not implemented"),
+            .bool => try parseBool(value_ptr, parser),
+            .int, .float => try parseNumber(value_ptr, parser),
             .pointer => |ptr_info| switch (ptr_info.size) {
                 .One => switch (@typeInfo(ptr_info.child)) {
-                    .array => |array_info| if (array_info.child == u8)
-                        @compileError("string not implemented")
-                    else
-                        @compileError("array not implemented"),
+                    .array => |array_info| {
+                        if (array_info.child == u8) {
+                            @compileError("string not implemented");
+                        } else {
+                            const TItem = @typeInfo(T).array.child;
+                            try parseArrayBuf(TItem, value_ptr, parser);
+                        }
+                    },
                     else => @compileError("value not implemented"),
                 },
                 .Many, .Slice => {
-                    // if (ptr_info.size == .Many and ptr_info.sentinel == null)
-                    //     @compileError("Cannot stringify type '" ++ @typeName(T) ++ "' without sentinel");
-                    // const slice = if (ptr_info.size == .Many) std.mem.span(value) else value;
-                    if (ptr_info.child == u8)
-                        @compileError("string not implemented")
-                    else
-                        @compileError("array not implemented");
+                    var len: usize = 0;
+                    if (ptr_info.child == u8) {
+                        const slice = try parseStringBuf(value_ptr.*, parser);
+                        len = slice.len;
+                    } else {
+                        const slice = try parseArrayBuf(ptr_info.child, value_ptr.*, parser);
+                        len = slice.len;
+                    }
+
+                    if (ptr_info.sentinel) |sentinel| {
+                        value_ptr.*[len] = @as(*const ptr_info.child, @ptrCast(@alignCast(sentinel))).*;
+                    }
                 },
-                else => @compileError("Cannot stringify type '" ++ @typeName(T) ++ "'"),
+                .C => @compileError("Cannot parse JSON into 'C' ptr"),
             },
-            .array => |array_info| if (array_info.child == u8)
-                @compileError("string not implemented")
-            else
-                @compileError("array not implemented"),
+            .array => |array_info| {
+                const slice = if (array_info.child == u8)
+                    try parseStringBuf(value_ptr, parser)
+                else
+                    try parseArrayBuf(array_info.child, value_ptr, parser);
+
+                if (array_info.sentinel) |sentinel| {
+                    value_ptr.*[slice.len] = @as(*const array_info.child, @ptrCast(@alignCast(sentinel))).*;
+                }
+            },
+            .vector => @compileError("TODO: Implement vector"),
             .@"struct" => |struct_info| if (struct_info.is_tuple)
-                @compileError("tuple not implemented")
+                @compileError("TODO: Implement tuple")
             else if (isArray(T))
-                @compileError("array list not implemented")
+                @compileError("TODO: Implement array list")
             else if (isHashMap(T))
-                @compileError("hashmap not implemented")
+                @compileError("TODO: Implement hashmap")
             else
-                return try parseObject(T, parser),
-            .null => @compileError("null not implemented"),
-            .optional => |optional_info| return try parseOptional(optional_info.child, parser),
+                try parseObject(value_ptr, parser),
+            .optional => try parseOptional(value_ptr, parser),
             .@"enum" => |enum_info| if (enum_info.is_exhaustive) {
-                @compileError("exhaustivve enum not implemented");
+                @compileError("TODO: Implement exhaustivve enum");
             } else {
-                @compileError("non-exhaustive enum not implemented");
+                @compileError("TODO: Implement non-exhaustive enum");
             },
-            .enum_literal => @compileError("enum literal not implemented"),
-            .@"union" => @compileError("union not implemented"),
-            else => @compileError("Cannot parse type '" ++ @typeName(T) ++ "'"),
+            .@"union" => @compileError("TODO: Implement union"),
+            .comptime_int => @compileError("Cannot parse JSON into 'comptime_int'"),
+            .comptime_float => @compileError("Cannot parse JSON into 'comptime_float'"),
+            .null => @compileError("Cannot parse JSON into 'null'"),
+            .enum_literal => @compileError("Cannot parse JSON into 'enum_literal'"),
+            .type => @compileError("Cannot parse JSON into 'type'"),
+            .void => @compileError("Cannot parse JSON into 'void'"),
+            .noreturn => @compileError("Cannot parse JSON into 'noreturn'"),
+            .undefined => @compileError("Cannot parse JSON into 'undefined'"),
+            .error_union => @compileError("Cannot parse JSON into 'error_union'"),
+            .error_set => @compileError("Cannot parse JSON into 'error_set'"),
+            .@"fn" => @compileError("Cannot parse JSON into 'fn'"),
+            .@"opaque" => @compileError("Cannot parse JSON into 'opaque'"),
+            .frame => @compileError("Cannot parse JSON into 'frame'"),
+            .@"anyframe" => @compileError("Cannot parse JSON into 'anyframe'"),
         }
     }
 
@@ -485,21 +476,24 @@ pub const json = struct {
                 continue :sw try parser.peekByte() orelse return error.invalid_json;
             },
             else => {
-                const element = try parseElement(T, parser);
+                try parseElement(&buf[slice.len], parser);
                 slice = try appendBuf(
                     T,
                     buf,
                     slice.len,
-                    element,
+                    buf[slice.len],
                 );
                 continue :sw try parser.peekByte() orelse return error.invalid_json;
             },
         }
     }
 
-    fn parseObject(comptime T: type, parser: *Parser) !T {
+    fn parseObject(value_ptr: anytype, parser: *Parser) !void {
+        const TPtr = @TypeOf(value_ptr);
+        const T = std.meta.Child(TPtr);
         // TODO: would trying to init class with exact fields be faster somehow? idk.
-        var result: T = std.mem.zeroInit(T, .{});
+        // var result: T = std.mem.zeroInit(T, .{});
+        value_ptr.* = std.mem.zeroInit(T, .{});
         var buf: [256]u8 = @splat(0);
         if (try parser.consumeByte() != '{') {
             return error.invalid_json;
@@ -508,7 +502,7 @@ pub const json = struct {
         sw: switch (try parser.peekByte() orelse return error.invalid_json) {
             '}' => {
                 _ = try parser.consumeByte();
-                return result;
+                return;
             },
             ',' => {
                 _ = try parser.consumeByte();
@@ -527,13 +521,8 @@ pub const json = struct {
                     const struct_field: std.builtin.Type.StructField = field;
                     if (std.mem.eql(u8, struct_field.name, member_name)) {
                         member_found = true;
-                        const member_value = try parseMemberElement(
-                            struct_field.type,
-                            parser,
-                            &result,
-                            struct_field.name,
-                        );
-                        @field(result, struct_field.name) = member_value;
+                        try parseElement(&@field(value_ptr, struct_field.name), parser);
+                        // @field(result, struct_field.name) = member_value;
                     }
                 }
 
@@ -550,9 +539,11 @@ pub const json = struct {
         return error.invalid_json;
     }
 
-    fn parseNumber(comptime T: type, parser: *Parser) !T {
-        return switch (@typeInfo(T)) {
-            .int => try parseInteger(T, parser),
+    fn parseNumber(value_ptr: anytype, parser: *Parser) !void {
+        const TPtr = @TypeOf(value_ptr);
+        const T = std.meta.Child(TPtr);
+        switch (@typeInfo(T)) {
+            .int => try parseInteger(value_ptr, parser),
             .float => {
                 try parser.feed();
                 // var slice: []u8 = parser.buf[0..0];
@@ -595,48 +586,52 @@ pub const json = struct {
                     }
                 }
 
-                const float: T = try std.fmt.parseFloat(T, parser.slice[0..len]);
+                value_ptr.* = try std.fmt.parseFloat(T, parser.slice[0..len]);
                 parser.discardBytes(len);
-                return float;
+                return;
             },
             else => @compileError("Type '" ++ @typeName(T) ++ "' is not a number."),
-        };
+        }
     }
 
-    fn parseInteger(comptime T: type, parser: *Parser) !T {
+    fn parseInteger(value_ptr: anytype, parser: *Parser) !void {
+        const TPtr = @TypeOf(value_ptr);
+        const T = std.meta.Child(TPtr);
         switch (@typeInfo(T)) {
             .int => |int_info| {
                 switch (int_info.signedness) {
                     .signed => if ((try parser.peekByte() orelse return error.invalid_json) == '-') {
                         _ = try parser.consumeByte();
-                        return try parseUnsignedInteger(T, parser) * -1;
+                        try parseUnsignedInteger(value_ptr, parser);
+                        value_ptr.* *= -1;
                     } else {
-                        return try parseUnsignedInteger(T, parser);
+                        try parseUnsignedInteger(value_ptr, parser);
                     },
-                    .unsigned => return try parseUnsignedInteger(T, parser),
+                    .unsigned => try parseUnsignedInteger(value_ptr, parser),
                 }
             },
             else => @compileError("Type '" ++ @typeName(T) ++ "' is not an integer."),
         }
     }
 
-    fn parseUnsignedInteger(comptime T: type, parser: *Parser) !T {
-        var int: T = 0;
+    fn parseUnsignedInteger(value_ptr: anytype, parser: *Parser) !void {
+        const TPtr = @TypeOf(value_ptr);
+        const T = std.meta.Child(TPtr);
         // TODO: handle empty
-        sw: switch (try parser.peekByte() orelse return int) {
+        sw: switch (try parser.peekByte() orelse return error.invalid_json) {
             '0'...'9' => {
                 const digit: T = try parser.consumeByte() - '0';
-                int = int * 10 + digit;
-                continue :sw try parser.peekByte() orelse return int;
+                value_ptr.* = value_ptr.* * 10 + digit;
+                continue :sw try parser.peekByte() orelse return;
             },
+            else => return,
             // TODO: fraction
             // TODO: exponent
             // TODO: handle good exit vs empty number
-            else => return int,
         }
     }
 
-    fn parseBool(parser: *Parser) !bool {
+    fn parseBool(value_ptr: *bool, parser: *Parser) !void {
         var buf: [5]u8 = @splat(0);
         if (try parser.peekByte()) |byte|
             switch (byte) {
@@ -648,7 +643,8 @@ pub const json = struct {
                     }
 
                     if (std.mem.eql(u8, buf[0..4], "true")) {
-                        return true;
+                        value_ptr.* = true;
+                        return;
                     } else {
                         return error.invalid_json;
                     }
@@ -661,7 +657,8 @@ pub const json = struct {
                     }
 
                     if (std.mem.eql(u8, buf[0..5], "false")) {
-                        return false;
+                        value_ptr.* = false;
+                        return;
                     } else {
                         return error.invalid_json;
                     }
@@ -744,12 +741,24 @@ pub const json = struct {
     }
 
     // TODO: parseStringAlloc
+    // TODO: how to deal with anyerror? I'd like this to have a well-defined error list.
 
-    fn parseOptional(comptime T: type, parser: *Parser) !?T {
+    fn parseOptional(value_ptr: anytype, parser: *Parser) anyerror!void {
         if (try parser.peekByte()) |byte|
             switch (byte) {
-                'n' => return if (try parser.checkSlice("null")) null else error.invalid_json,
-                else => return try parseValue(T, parser),
+                'n' => {
+                    if (try parser.checkSlice("null")) {
+                        value_ptr.* = null;
+                    } else {
+                        return error.invalid_json;
+                    }
+                },
+                else => {
+                    const T = @typeInfo(@typeInfo(@TypeOf(value_ptr)).pointer.child).optional.child;
+                    var value_not_null: T = undefined;
+                    try parseValue(&value_not_null, parser);
+                    value_ptr.* = value_not_null;
+                },
             }
         else
             return error.invalid_json;
@@ -763,113 +772,129 @@ pub const json = struct {
     //     parser: *Parser,
     // ) !bool {}
 
-    pub fn parseFromSlice(comptime T: type, slice: []const u8) !T {
+    pub fn parseFromSlice(value_ptr: anytype, slice: []const u8) !void {
         var stream = std.io.fixedBufferStream(slice);
-        return try parse(T, stream.reader().any());
+        try parse(value_ptr, stream.reader().any());
     }
 };
 
-test "parse array" {
-    // TODO: Plug into generic parse function
-
-    var buf: [100]f32 = undefined;
-    var stream = std.io.fixedBufferStream(
+// Parsing to a target of slice requires the target
+// to have sufficient length to fit the parsed items.
+// When length is unknown use allocating parse function.
+test "parse array -> []f32" {
+    var buf: []f32 = try std.testing.allocator.alloc(f32, 5);
+    defer std.testing.allocator.free(buf);
+    buf[0..5].* = @splat(0);
+    try json.parseFromSlice(
+        &buf,
         \\ [1.23, 2.34, 3.45, 4.56]
+        ,
     );
-    var parser: json.Parser = .init(stream.reader().any());
-    try parser.consumeWhitespace(); // TODO: This shouldn't be in test?
     try std.testing.expectEqualSlices(
         f32,
-        &.{ 1.23, 2.34, 3.45, 4.56 },
-        try json.parseArrayBuf(f32, &buf, &parser),
+        &.{ 1.23, 2.34, 3.45, 4.56, 0 },
+        buf,
     );
 }
 
-test "parse object" {
-    const Foo = struct { bar: bool, baz: f32, fizz: u32 };
-    try std.testing.expectEqual(
-        Foo{ .bar = true, .baz = 1.23, .fizz = 456 },
-        try json.parseFromSlice(
-            Foo,
-            \\ {"bar":true,"baz":1.23,"fizz":456}
-            ,
-        ),
+test "parse array -> [_:0]f32" {
+    var buf: [100:0]f32 = @splat(1);
+    try json.parseFromSlice(
+        &buf,
+        \\ [1.23, 2.34, 3.45, 4.56]
+        ,
     );
+    try std.testing.expectEqualSlices(
+        f32,
+        &.{ 1.23, 2.34, 3.45, 4.56 },
+        buf[0..std.mem.indexOfSentinel(f32, 0, &buf)],
+    );
+}
+
+test "parse array -> [_]f32" {
+    var buf: [100]f32 = @splat(0);
+    try json.parseFromSlice(
+        &buf,
+        \\ [1.23, 2.34, 3.45, 4.56]
+        ,
+    );
+    try std.testing.expectEqualSlices(f32, &.{ 1.23, 2.34, 3.45, 4.56 }, buf[0..4]);
+}
+
+test "parse object -> struct" {
+    const Foo = struct { bar: bool, baz: f32, fizz: u32 };
+    var foo = std.mem.zeroInit(Foo, .{});
+    try json.parseFromSlice(
+        &foo,
+        \\ {"bar":true,"baz":1.23,"fizz":456}
+        ,
+    );
+    try std.testing.expectEqual(Foo{ .bar = true, .baz = 1.23, .fizz = 456 }, foo);
 }
 
 test "parse object nested" {
     const Bar = struct { burbur: bool };
     const Foo = struct { bar: Bar, baz: f32, fizz: u32 };
-    try std.testing.expectEqual(
-        Foo{ .bar = .{ .burbur = false }, .baz = 1.23, .fizz = 456 },
-        try json.parseFromSlice(
-            Foo,
-            \\ {"bar":{"burbur":false},"baz":1.23,"fizz":456}
-            ,
-        ),
+    var foo = std.mem.zeroInit(Foo, .{});
+    try json.parseFromSlice(
+        &foo,
+        \\ {"bar":{"burbur":false},"baz":1.23,"fizz":456}
+        ,
     );
+    try std.testing.expectEqual(Foo{ .bar = .{ .burbur = false }, .baz = 1.23, .fizz = 456 }, foo);
 }
 
 test "parse object string member" {
     {
         // Array
         const Foo = struct { bar: [100]u8, baz: bool };
-        var actual = try json.parseFromSlice(
-            Foo,
+        var foo = std.mem.zeroInit(Foo, .{});
+        try json.parseFromSlice(
+            &foo,
             \\ {"bar":"hello, world!","baz":true}
             ,
         );
         try std.testing.expectEqualSlices(
             u8,
             "hello, world!",
-            actual.bar[0..13],
+            foo.bar[0..13],
         );
     }
 }
 
 test "parse numbers" {
-    try std.testing.expectEqual(123, try json.parseFromSlice(u32,
-        \\
-        \\  123
-    ));
-    try std.testing.expectEqual(-123, try json.parseFromSlice(i32,
-        \\
-        \\  -123
-    ));
-    try std.testing.expectEqual(321, try json.parseFromSlice(i32,
-        \\
-        \\  321
-    ));
-    try std.testing.expectEqual(123.123, try json.parseFromSlice(f32, "123.123"));
-    try std.testing.expectEqual(-123.321, try json.parseFromSlice(f32, "-123.321"));
+    try testParseFromSlice(u32, 123, "123");
+    try testParseFromSlice(i32, 123, "123");
+    try testParseFromSlice(i32, -123, "-123");
+    try testParseFromSlice(f32, 123.456, "123.456");
+    try testParseFromSlice(f32, -123.456, "-123.456");
 }
 
-test "parse string" {
+test "parse string -> [_]u8" {
     // TODO: Fix multi-byte unicode
-    var buf: [100]u8 = undefined;
-    var stream = std.io.fixedBufferStream("\n\"hello\\n\\u0077\\u006f\\u0072\\u006c\\u0064\"");
-    var parser: json.Parser = .init(stream.reader().any());
-    try parser.consumeWhitespace();
-    try std.testing.expectEqualStrings("hello\nworld", try json.parseStringBuf(&buf, &parser));
+
+    try testParseFromSlice([11]u8, "hello world".*, "\n\"hello \\u0077\\u006f\\u0072\\u006c\\u0064\"");
+    try testParseFromSlice([15]u8, "hello\nworld\x00\x00\x00\x00".*, "\n\"hello\\n\\u0077\\u006f\\u0072\\u006c\\u0064\"");
+}
+
+test "parse string -> [_:0]u8" {
+    // TODO: Fix multi-byte unicode
+
+    try testParseFromSlice([11:0]u8, "hello world".*, "\n\"hello \\u0077\\u006f\\u0072\\u006c\\u0064\"");
+    try testParseFromSlice([15:0]u8, "hello\nworld\x00\x00\x00\x00".*, "\n\"hello\\n\\u0077\\u006f\\u0072\\u006c\\u0064\"");
 }
 
 test "parse bool" {
-    try std.testing.expectEqual(true, try json.parseFromSlice(bool,
-        \\            
-        \\  true 
-    ));
-    try std.testing.expectEqual(true, try json.parseFromSlice(bool, "true "));
-    try std.testing.expectError(error.invalid_json, json.parseFromSlice(bool, "tru"));
-    try std.testing.expectEqual(false, try json.parseFromSlice(bool,
-        \\            
-        \\  false 
-    ));
-    try std.testing.expectEqual(false, try json.parseFromSlice(bool, "false "));
-    try std.testing.expectError(error.invalid_json, json.parseFromSlice(bool, "fals"));
-    try std.testing.expectError(error.invalid_json, json.parseFromSlice(bool, "null"));
-    try std.testing.expectEqual(true, try json.parseFromSlice(?bool, "true "));
-    try std.testing.expectEqual(null, try json.parseFromSlice(?bool, "null"));
-    try std.testing.expectError(error.invalid_json, json.parseFromSlice(?bool, "nil"));
+    try testParseFromSlice(bool, true, "true");
+    try testParseFromSlice(bool, false, "false");
+
+    try testParseFromSlice(?bool, null, "null");
+    try testParseFromSlice(?bool, true, "true");
+    try testParseFromSlice(?bool, false, "false");
+
+    try testParseFromSliceError(bool, error.invalid_json, "tru");
+    try testParseFromSliceError(bool, error.invalid_json, "fals");
+    try testParseFromSliceError(bool, error.invalid_json, "null");
 }
 
 test "stringify struct" {
@@ -1043,4 +1068,16 @@ fn testStringify(expected: []const u8, value: anytype) !void {
     const actual = try json.stringifyAlloc(std.testing.allocator, value);
     defer std.testing.allocator.free(actual);
     try std.testing.expectEqualStrings(expected, actual);
+}
+
+fn testParseFromSlice(comptime T: type, expected: T, slice: []const u8) !void {
+    var actual = std.mem.zeroes(T);
+    try json.parseFromSlice(&actual, slice);
+    try std.testing.expectEqual(expected, actual);
+}
+
+fn testParseFromSliceError(comptime T: type, err: anytype, slice: []const u8) !void {
+    // var actual: T = if (std.meta.activeTag(@typeInfo(T)) == .@"struct") std.mem.zeroInit(T, .{}) else std.mem.zeroes(T);
+    var actual = std.mem.zeroes(T);
+    try std.testing.expectError(err, json.parseFromSlice(&actual, slice));
 }
